@@ -5,7 +5,8 @@ export type EntryRow = {
   status: string
   pending: boolean
   abnormal: boolean
-  [field: string]: string | number | boolean
+  workflow?: Record<string, any>
+  [field: string]: any
 }
 
 export type ModuleMeta = {
@@ -30,6 +31,8 @@ export type PageResult = {
 export type ActionResult = {
   ok: boolean
   message: string
+  data?: Record<string, any> | null
+  entry?: EntryRow | null
 }
 
 export type OverviewResult = {

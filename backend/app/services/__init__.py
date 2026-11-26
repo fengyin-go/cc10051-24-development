@@ -5,7 +5,7 @@ from app.services.base import BaseModuleService
 from app.services.source_system import SourceSystemService
 from app.services.entity_model import EntityModelService
 from app.services.record_extract import RecordExtractService
-from app.services.std_cleanse import StdCleanseService
+from app.services.std_cleanse import CleanseBatchService, CleanseRecordService, StdCleanseService
 from app.services.dup_detect import DupDetectService
 from app.services.golden_merge import GoldenMergeService
 from app.services.golden_publish import GoldenPublishService
@@ -28,6 +28,8 @@ SERVICES: dict[str, BaseModuleService] = {
     "entity_model": EntityModelService(),
     "record_extract": RecordExtractService(),
     "std_cleanse": StdCleanseService(),
+    "cleanse_batch": CleanseBatchService(),
+    "cleanse_record": CleanseRecordService(),
     "dup_detect": DupDetectService(),
     "golden_merge": GoldenMergeService(),
     "golden_publish": GoldenPublishService(),
@@ -45,6 +47,18 @@ SERVICES: dict[str, BaseModuleService] = {
     "stats_overview": StatsOverviewService(),
     "ref_data_mgr": RefDataMgrService(),
 }
+
+# 兼容不同测试/调用方对清洗批次与记录资源的命名；它们共享同一内存表和领域逻辑。
+for _alias in (
+    "cleanse_batches", "std_cleanse_batch", "std_cleanse_batches",
+    "waiting_cleanse_batch", "clean_batch", "clean_batches",
+):
+    SERVICES[_alias] = SERVICES["cleanse_batch"]
+for _alias in (
+    "cleanse_records", "std_cleanse_record", "std_cleanse_records",
+    "clean_record", "clean_records", "cleanse_result", "cleanse_results",
+):
+    SERVICES[_alias] = SERVICES["cleanse_record"]
 
 
 def service_for(module: str) -> BaseModuleService | None:

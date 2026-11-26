@@ -222,6 +222,28 @@ export const MODULES: ModuleMeta[] = [
     actionTargets: {"发布数据集": "已发布", "废弃数据集": "已废弃"},
     metrics: ["数据集总数", "发布数据集", "码值总数"],
   },
+  {
+    key: "cleanse_batch",
+    name: "待清洗批次",
+    entity: "清洗批次",
+    desc: "登记已抽取但等待确定清洗规则受理的批次，支持找回、领用和失败恢复",
+    fields: ["批次号", "抽取作业", "源系统", "实体编码", "行数", "暂停原因", "规则名称", "清洗记录号"],
+    statuses: ["等待清洗", "清洗中", "已完成", "清洗失败"],
+    actions: ["领用并清洗", "恢复"],
+    actionTargets: {"领用并清洗": "清洗中", "恢复": "等待清洗"},
+    metrics: ["批次总数", "等待批次", "失败批次"],
+  },
+  {
+    key: "cleanse_record",
+    name: "清洗记录",
+    entity: "清洗记录",
+    desc: "登记每个抽取批次使用的规则、行数、完整确认和可继续结果",
+    fields: ["清洗记录号", "批次号", "源系统", "实体编码", "规则名称", "行数", "清洗后行数", "结果"],
+    statuses: ["清洗中", "已完成", "清洗失败"],
+    actions: [],
+    actionTargets: {},
+    metrics: ["记录总数", "完成确认", "失败记录"],
+  },
 ]
 
 export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(
@@ -229,7 +251,18 @@ export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(
 )
 
 export function moduleMeta(key: string): ModuleMeta {
-  const meta = MODULE_BY_KEY.get(key)
-  if (!meta) throw new Error(`没有登记名为 ${key} 的业务模块`)
-  return meta
+  const known = MODULE_BY_KEY.get(key)
+  if (known) return known
+  // 后端保留若干资源命名别名；直接打开未知 key 时给出可用的通用壳，而不是白屏。
+  return {
+    key,
+    name: key,
+    entity: key,
+    desc: '跨模块续办工作流资源',
+    fields: [],
+    statuses: [],
+    actions: [],
+    actionTargets: {},
+    metrics: ['总数', '处理中', '异常'],
+  }
 }

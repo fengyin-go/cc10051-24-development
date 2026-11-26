@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from app.services import cleanse_flow
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -21,6 +22,13 @@ class StdCleanseService(BaseModuleService):
     STATUS_ORDER = ["草稿", "已启用", "已停用"]
     ACTION_RULES = {"启用规则": "已启用", "停用规则": "已停用"}
     NEGATIVE_ACTIONS = ["停用规则"]
+
+    def run_action(self, entry_id: int, action: str, payload: Any | None = None):
+        entry, message = super().run_action(entry_id, action, payload)
+        if entry is not None and action == "启用规则":
+            # 只发“新规则已启用”的幂等通知；批次仍需正式领用，避免通知/重试竞态产生多笔结果。
+            cleanse_flow.notify_rule_enabled(entry)
+        return entry, message
 
     # ---- 业务扩展：标准化清洗与检测派发 ----
 
@@ -116,11 +124,127 @@ class StdCleanseService(BaseModuleService):
         return report_id
 
     def batch_enable(self, entity_code: str) -> int:
-        """批量启用某实体下的全部草稿清洗规则。"""
-        enabled = 0
+        """批量启用某实体下的全部草稿清洗规则，并幂等通知等待批次。"""
+        enabled_rules = []
         for rule in store.rows(self.MODULE):
             if rule.get("实体编码") == entity_code and rule.get("status") == "草稿":
                 rule["status"] = "已启用"
                 rule["pending"] = True
-                enabled += 1
-        return enabled
+                enabled_rules.append(rule)
+        for rule in enabled_rules:
+            cleanse_flow.notify_rule_enabled(rule)
+        return len(enabled_rules)
+
+    # ---- 抽取批次领用/结果/恢复的服务入口（HTTP 与直接单测共用） ----
+
+    @staticmethod
+    def _workflow_body(payload: Any | None, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if payload is None:
+            body: dict[str, Any] = {}
+        elif isinstance(payload, dict):
+            body = dict(payload)
+        else:
+            # 兼容 claim_batch("R1") 这类位置参数调用。
+            body = {"batch_no": str(payload)}
+        body.update(kwargs)
+        return body
+
+    def claim_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return cleanse_flow.claim_batch(self._workflow_body(payload, kwargs))
+
+    def claim(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.claim_batch(payload, **kwargs)
+
+    def lease_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.claim_batch(payload, **kwargs)
+
+    def execute_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return cleanse_flow.execute_batch(self._workflow_body(payload, kwargs))
+
+    def complete_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return cleanse_flow.complete_batch(self._workflow_body(payload, kwargs))
+
+    def confirm_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.complete_batch(payload, **kwargs)
+
+    def fail_batch(self, payload: Any | None = None, reason: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        body = self._workflow_body(payload, kwargs)
+        if reason:
+            body["reason"] = reason
+        return cleanse_flow.fail_batch(body)
+
+    def report_failure(self, payload: Any | None = None, reason: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.fail_batch(payload, reason=reason, **kwargs)
+
+    def recover_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return cleanse_flow.recover_batch(self._workflow_body(payload, kwargs))
+
+    def restore_batch(self, payload: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.recover_batch(payload, **kwargs)
+
+    def get_batch(self, batch_no: str) -> dict[str, Any] | None:
+        return cleanse_flow.find_batch(batch_no)
+
+    def list_batches(
+        self,
+        source: str | None = None,
+        entity_code: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = store.rows("cleanse_batch")
+        if source:
+            rows = [row for row in rows if source in str(row.get("源系统", ""))]
+        if entity_code:
+            rows = [row for row in rows if row.get("实体编码") == entity_code]
+        if status:
+            rows = [row for row in rows if row.get("status") == status]
+        return rows
+
+    def list_waiting_batches(self, source: str | None = None, entity_code: str | None = None) -> list[dict[str, Any]]:
+        return self.list_batches(source=source, entity_code=entity_code, status=cleanse_flow.WAITING)
+
+
+class CleanseBatchService(BaseModuleService):
+    """等待/处理中/失败可恢复的清洗批次资源。"""
+
+    MODULE = "cleanse_batch"
+    ENTITY = "待清洗批次"
+    LIST_FIELDS = ["批次号", "抽取作业", "源系统", "实体编码", "行数", "status", "暂停原因", "规则名称", "清洗记录号"]
+    REQUIRED_FIELDS = ["批次号", "源系统", "实体编码"]
+    STATUS_ORDER = ["等待清洗", "清洗中", "已完成", "清洗失败"]
+    ACTION_RULES = {"恢复": "等待清洗", "领用": "清洗中"}
+
+    def list_entries(self, **kwargs: Any):
+        if kwargs.get("status") == "待清洗":
+            kwargs["status"] = cleanse_flow.WAITING
+        return super().list_entries(**kwargs)
+
+    def run_action(self, entry_id: int, action: str, payload: Any | None = None):
+        batch = store.find(self.MODULE, entry_id)
+        if batch is None:
+            return None, f"待清洗批次 {entry_id} 不存在"
+        body = payload if isinstance(payload, dict) else (
+            payload.model_dump(exclude_none=True) if payload is not None and hasattr(payload, "model_dump") else {}
+        )
+        body = {**body, "batch_no": batch.get("批次号")}
+        if action in {"恢复", "恢复批次", "找回"}:
+            result = cleanse_flow.recover_batch(body)
+            return (result.get("batch") if result.get("ok") else None), str(result.get("message"))
+        if action in {"领用", "认领", "正式认领"}:
+            result = cleanse_flow.claim_batch(body)
+            return (result.get("batch") if result.get("ok") else None), str(result.get("message"))
+        if action in {"领用并清洗", "执行清洗"}:
+            result = cleanse_flow.execute_batch(body)
+            return (result.get("batch") if result.get("ok") else None), str(result.get("message"))
+        return super().run_action(entry_id, action, payload)
+
+
+class CleanseRecordService(BaseModuleService):
+    """清洗完成/失败后登记的规则、行数和可继续结果。"""
+
+    MODULE = "cleanse_record"
+    ENTITY = "清洗记录"
+    LIST_FIELDS = ["清洗记录号", "批次号", "源系统", "实体编码", "规则名称", "行数", "清洗后行数", "status", "结果"]
+    REQUIRED_FIELDS = ["批次号", "实体编码"]
+    STATUS_ORDER = ["清洗中", "已完成", "清洗失败"]
+    ACTION_RULES: dict[str, str] = {}

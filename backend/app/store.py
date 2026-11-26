@@ -16,7 +16,9 @@ class Store:
         }
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        # 工作流子表（cleanse_batch/cleanse_record/extract_row）可以懒创建，
+        # 但不属于导航中的 20 个业务模块，概览仍只统计 SEED_ROWS 模块。
+        return sorted(SEED_ROWS.keys())
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])

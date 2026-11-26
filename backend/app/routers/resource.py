@@ -94,5 +94,9 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
 def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    entry, message = service.run_action(entry_id, payload.action.strip(), payload)
+    data = entry.get("workflow_result") if isinstance(entry, dict) else None
+    ok = entry is not None
+    if isinstance(data, dict) and data.get("ok") is False:
+        ok = False
+    return ActionResult(ok=ok, message=message, entry=entry, data=data)
